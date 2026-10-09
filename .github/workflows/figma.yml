@@ -40,7 +40,20 @@ jobs:
           fi
           echo "file_key=$file_key" >> "$GITHUB_OUTPUT"
           echo "node_id=$node_id" >> "$GITHUB_OUTPUT"
-          echo "branch=figma/${node_id//:/-}-$(date +%Y%m%d%H%M%S)" >> "$GITHUB_OUTPUT"
+          # One branch (and PR) per frame
+          echo "branch=figma/$file_key-${node_id//:/-}" >> "$GITHUB_OUTPUT"
+
+      # Continue on the frame's branch while its PR is open; otherwise start fresh from main
+      - name: Check out existing frame branch
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BRANCH: ${{ steps.figma.outputs.branch }}
+        run: |
+          if [ -n "$(gh pr list --head "$BRANCH" --state open --json number --jq '.[0].number')" ]; then
+            git fetch --depth=1 origin "$BRANCH"
+            git checkout -B "$BRANCH" FETCH_HEAD
+            echo "Continuing on $BRANCH"
+          fi
 
       - name: Render frame screenshot
         env:
@@ -115,7 +128,9 @@ jobs:
             5. Use semantic, accessible HTML and make the layout responsive.
             6. Run `pnpm build` and fix any errors.
 
-            Only modify files needed for this page. Do not commit; the workflow will open a PR.
+            Only modify files needed for this page. Do not commit; the workflow will commit and open/update the PR.
+            If the page already implements an earlier version of this frame, update it to match the
+            current design rather than rewriting it from scratch.
           claude_args: |
             --model claude-opus-5-5
             --max-turns 60
@@ -127,27 +142,39 @@ jobs:
         if: failure() && steps.claude.outcome == 'failure'
         run: jq -r '.[] | select(.type == "result") | .result // .errors // .' "$RUNNER_TEMP/claude-execution-output.json" || true
 
-      - name: Create pull request
+      - name: Commit, push and open or update PR
         id: pr
-        uses: peter-evans/create-pull-request@5f6978faf089d4d20b00c7766989d076bb2fc7f1 # v8.1.1
-        with:
-          branch: ${{ steps.figma.outputs.branch }}
-          commit-message: "feat: implement Figma frame ${{ steps.figma.outputs.node_id }}"
-          title: "Figma: implement frame ${{ steps.figma.outputs.node_id }}"
-          body: |
-            Implements the Figma frame in `src/pages/index.astro`.
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BRANCH: ${{ steps.figma.outputs.branch }}
+          NODE_ID: ${{ steps.figma.outputs.node_id }}
+        run: |
+          git add src public
+          if git diff --cached --quiet; then
+            echo "No changes to commit."
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit -m "feat: implement Figma frame $NODE_ID" -m "Source: $FIGMA_URL"
+          # Lease against the remote state, so a stale branch (closed/merged PR) can be replaced
+          # but concurrent pushes to an open PR's branch are not overwritten
+          remote_sha=$(git ls-remote --heads origin "$BRANCH" | cut -f1)
+          git push --force-with-lease="refs/heads/$BRANCH:$remote_sha" origin "HEAD:refs/heads/$BRANCH"
+          echo "pushed=true" >> "$GITHUB_OUTPUT"
 
-            **Source:** ${{ inputs.figma_url }}
+          pr=$(gh pr list --head "$BRANCH" --state open --json url --jq '.[0].url')
+          if [ -n "$pr" ]; then
+            gh pr comment "$pr" --body "🔄 Updated from latest Figma design: $FIGMA_URL"
+          else
+            gh pr create --base "${{ github.event.repository.default_branch }}" --head "$BRANCH" \
+              --title "Figma: implement frame $NODE_ID" \
+              --body "$(printf 'Implements the Figma frame in `src/pages/index.astro`.\n\n**Source:** %s\n\n🤖 Generated with [Claude Code](https://claude.com/claude-code)' "$FIGMA_URL")"
+          fi
 
-            🤖 Generated with [Claude Code](https://claude.com/claude-code)
-          add-paths: |
-            src/**
-            public/**
-          delete-branch: true
-
-      # PRs opened with GITHUB_TOKEN don't trigger pull_request workflows, but workflow_dispatch is allowed
+      # Pushes made with GITHUB_TOKEN don't trigger pull_request workflows, but workflow_dispatch is allowed
       - name: Trigger preview deployment
-        if: steps.pr.outputs.pull-request-number
+        if: steps.pr.outputs.pushed == 'true'
         env:
           GH_TOKEN: ${{ github.token }}
           BRANCH: ${{ steps.figma.outputs.branch }}
