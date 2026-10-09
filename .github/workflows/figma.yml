@@ -1,0 +1,148 @@
+name: Figma → Code
+
+on:
+  workflow_dispatch:
+    inputs:
+      figma_url:
+        description: "Figma frame URL (must include ?node-id=…)"
+        required: true
+        type: string
+
+permissions:
+  actions: write # to dispatch preview.yml
+  contents: write
+  pull-requests: write
+  id-token: write
+
+concurrency:
+  group: figma-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  implement:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      FIGMA_URL: ${{ inputs.figma_url }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Parse Figma URL
+        id: figma
+        run: |
+          # Accepts figma.com/design/<key>/… , /file/<key>/… and /proto/<key>/…
+          file_key=$(echo "$FIGMA_URL" | sed -nE 's#^https://(www\.)?figma\.com/(design|file|proto)/([A-Za-z0-9]+).*#\3#p')
+          node_id=$(echo "$FIGMA_URL" | sed -nE 's#.*[?&]node-id=([0-9]+[-:][0-9]+).*#\1#p' | tr '-' ':')
+          if [ -z "$file_key" ] || [ -z "$node_id" ]; then
+            echo "::error::Could not parse file key and node-id from '$FIGMA_URL'. Copy the link to a frame (right-click → Copy link to selection)."
+            exit 1
+          fi
+          echo "file_key=$file_key" >> "$GITHUB_OUTPUT"
+          echo "node_id=$node_id" >> "$GITHUB_OUTPUT"
+          echo "branch=figma/${node_id//:/-}-$(date +%Y%m%d%H%M%S)" >> "$GITHUB_OUTPUT"
+
+      - name: Render frame screenshot
+        env:
+          FIGMA_TOKEN: ${{ secrets.FIGMA_ACCESS_TOKEN }}
+          FILE_KEY: ${{ steps.figma.outputs.file_key }}
+          NODE_ID: ${{ steps.figma.outputs.node_id }}
+        run: |
+          mkdir -p "$RUNNER_TEMP/figma"
+          image_url=$(curl -fsS -H "X-Figma-Token: $FIGMA_TOKEN" \
+            "https://api.figma.com/v1/images/$FILE_KEY?ids=$NODE_ID&format=png&scale=2" \
+            | jq -r --arg id "$NODE_ID" '.images[$id] // empty')
+          if [ -z "$image_url" ]; then
+            echo "::error::Figma did not return a render for node $NODE_ID. Check the URL and token access."
+            exit 1
+          fi
+          curl -fsSL "$image_url" -o "$RUNNER_TEMP/figma/frame.png"
+
+      - uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
+        with:
+          version: 12
+
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 24
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Write MCP config
+        env:
+          FIGMA_TOKEN: ${{ secrets.FIGMA_ACCESS_TOKEN }}
+        run: |
+          # Framelink MCP: exposes get_figma_data / download_figma_images using a Figma PAT
+          jq -n --arg key "$FIGMA_TOKEN" '{
+            mcpServers: {
+              figma: {
+                command: "npx",
+                args: ["-y", "figma-developer-mcp", "--stdio"],
+                env: { FIGMA_API_KEY: $key }
+              }
+            }
+          }' > "$RUNNER_TEMP/mcp.json"
+
+      - name: Implement design with Claude Code
+        uses: anthropics/claude-code-action@1d6de8cb0c237e7c15e9e1bdf973826ebae490cc # v1.0.248
+        with:
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          # Or use an API key instead:
+          # anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          prompt: |
+            Implement the Figma frame below in this Astro project.
+
+            - Figma URL: ${{ inputs.figma_url }}
+            - File key: ${{ steps.figma.outputs.file_key }}
+            - Node id: ${{ steps.figma.outputs.node_id }}
+            - Rendered screenshot of the frame: ${{ runner.temp }}/figma/frame.png
+
+            Steps:
+            1. Look at the screenshot, then fetch the frame's structure, styles and text with the
+               `get_figma_data` tool (fileKey + nodeId above).
+            2. Implement (or update, if it already exists) the design in `src/pages/index.astro`.
+               This is a single-page setup for now — do not add other pages or routes.
+               Keep using `src/layouts/Layout.astro`. Make sure `src/styles/global.css` is loaded.
+            3. Style with Tailwind CSS v4 utility classes. Prefer existing KERN UX classes
+               (`@kern-ux/native`) for components such as buttons, inputs and typography where they match.
+            4. Images/icons: download them with `download_figma_images` into `public/figma/`
+               and reference them as `${import.meta.env.BASE_URL}figma/<name>` (the site may be served
+               from a subpath, so never hardcode root-relative URLs).
+            5. Use semantic, accessible HTML and make the layout responsive.
+            6. Run `pnpm build` and fix any errors.
+
+            Only modify files needed for this page. Do not commit; the workflow will open a PR.
+          claude_args: |
+            --model claude-opus-5-5
+            --max-turns 60
+            --mcp-config ${{ runner.temp }}/mcp.json
+            --allowedTools "Read,Edit,Write,Glob,Grep,Bash(pnpm build),Bash(pnpm astro check),mcp__figma__get_figma_data,mcp__figma__download_figma_images"
+
+      - name: Create pull request
+        id: pr
+        uses: peter-evans/create-pull-request@5f6978faf089d4d20b00c7766989d076bb2fc7f1 # v8.1.1
+        with:
+          branch: ${{ steps.figma.outputs.branch }}
+          commit-message: "feat: implement Figma frame ${{ steps.figma.outputs.node_id }}"
+          title: "Figma: implement frame ${{ steps.figma.outputs.node_id }}"
+          body: |
+            Implements the Figma frame in `src/pages/index.astro`.
+
+            **Source:** ${{ inputs.figma_url }}
+
+            🤖 Generated with [Claude Code](https://claude.com/claude-code)
+          add-paths: |
+            src/**
+            public/**
+          delete-branch: true
+
+      # PRs opened with GITHUB_TOKEN don't trigger pull_request workflows, but workflow_dispatch is allowed
+      - name: Trigger preview deployment
+        if: steps.pr.outputs.pull-request-number
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BRANCH: ${{ steps.figma.outputs.branch }}
+        run: gh workflow run preview.yml --repo "$GITHUB_REPOSITORY" --ref "$BRANCH"
