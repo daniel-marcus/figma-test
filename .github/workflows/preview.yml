@@ -1,0 +1,104 @@
+name: Preview
+
+on:
+  workflow_dispatch:
+  pull_request:
+    types: [opened, synchronize, reopened, closed]
+  delete:
+
+jobs:
+  # Builds the branch and deploys it to gh-pages under /<branch>/.
+  # Skips PRs from forks (their token can't push to gh-pages anyway).
+  deploy:
+    if: |
+      github.event_name != 'delete' &&
+      github.event.action != 'closed' &&
+      (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+    concurrency:
+      group: preview-${{ github.head_ref || github.ref_name }}
+      cancel-in-progress: true
+    env:
+      BRANCH: ${{ github.head_ref || github.ref_name }}
+      BASE_PATH: /${{ github.event.repository.name }}/${{ github.head_ref || github.ref_name }}/
+      SITE: https://${{ github.repository_owner }}.github.io
+    environment:
+      name: preview
+      url: https://${{ github.repository_owner }}.github.io/${{ github.event.repository.name }}/${{ github.head_ref || github.ref_name }}/
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
+        with:
+          version: 12
+
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 24
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Build
+        run: pnpm build # astro.config.mjs reads SITE and BASE_PATH
+
+      - name: Disable Jekyll # so the _astro/ directory is served
+        run: touch dist/.nojekyll
+
+      - name: Deploy to gh-pages
+        uses: JamesIves/github-pages-deploy-action@fa24774553152dd7873cd16ebd8d959b010c5445 # v4.9.0
+        with:
+          folder: dist
+          branch: gh-pages
+          target-folder: ${{ env.BRANCH }}
+          clean: false # keep other branches' previews
+
+      - name: Comment preview URL on PR
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          url="$SITE$BASE_PATH"
+          echo "Preview: $url" >> "$GITHUB_STEP_SUMMARY"
+          # Also works for workflow_dispatch runs, e.g. triggered by figma.yml
+          pr=$(gh pr list --repo "$GITHUB_REPOSITORY" --head "$BRANCH" --state open --json number --jq '.[0].number')
+          if [ -n "$pr" ]; then
+            gh pr comment "$pr" --repo "$GITHUB_REPOSITORY" --edit-last --create-if-none \
+              --body "🔍 **Preview:** $url (updated for ${GITHUB_SHA::7})"
+          fi
+
+  # Removes the preview when the PR is closed or the branch is deleted.
+  cleanup:
+    if: |
+      (github.event_name == 'delete' && github.event.ref_type == 'branch') ||
+      (github.event_name == 'pull_request' && github.event.action == 'closed' &&
+       github.event.pull_request.head.repo.full_name == github.repository)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    concurrency:
+      group: preview-${{ github.head_ref || github.event.ref }}
+      cancel-in-progress: true
+    env:
+      BRANCH: ${{ github.head_ref || github.event.ref }}
+    steps:
+      - name: Checkout gh-pages
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: gh-pages
+
+      - name: Remove preview folder
+        run: |
+          if [ -n "$BRANCH" ] && [ -d "$BRANCH" ]; then
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git rm -rfq -- "$BRANCH"
+            git commit -m "Remove preview for $BRANCH"
+            git push
+          else
+            echo "No preview found for $BRANCH"
+          fi
