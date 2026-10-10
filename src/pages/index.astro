@@ -1,7 +1,74 @@
 ---
 import Layout from "../layouts/Layout.astro"
+
+const base = import.meta.env.BASE_URL
+
+const cards = [
+  {
+    title: "Titel 1",
+    text: "Hallo, hier steht Text.",
+    image: "img-7f1e26ff3c438ee367dcad4ee0788a861a2fbd7e.jpg",
+  },
+  {
+    title: "Titel 2",
+    text: "Hallo, hier steht auch Text.",
+    image: "img-e44872890766b3fe69b75b3173b0805aa9eb7992.jpg",
+  },
+  {
+    title: "Titel 3",
+    text: "Hier könnte Ihre Werbung stehen",
+    image: "img-a6f2faf8b70cda91ccdb574e9aa940d2ca41ffd6.jpg",
+  },
+  {
+    title: "Titel 4",
+    text: "Hier könnte Ihre Werbung stehen",
+    image: "img-556507b673566a40a1464166dbc472146a211147.jpg",
+  },
+]
 ---
 
-<Layout title="Test">
-  <h1>Test</h1>
+<Layout title="Coole Seite v4.3">
+  <main class="mx-auto max-w-[1483px] bg-white">
+    <header class="px-4 pt-10 pb-8 sm:px-8 lg:px-[100px] lg:pt-16">
+      <h1 class="kern-heading-display">Coole Seite v4.3</h1>
+    </header>
+
+    <section
+      aria-label="Übersicht"
+      class="grid grid-cols-1 gap-x-8 gap-y-12 px-4 pb-16 sm:grid-cols-2 sm:px-8 lg:grid-cols-3 lg:px-[100px] lg:pb-[115px]"
+    >
+      {
+        cards.map((card) => (
+          <article class="kern-card">
+            <div class="kern-card__media">
+              <img
+                src={`${base}figma/${card.image}`}
+                alt=""
+                class="aspect-video h-auto w-full object-cover"
+                loading="lazy"
+              />
+            </div>
+            <div class="kern-card__container">
+              <header class="kern-card__header">
+                <p class="kern-preline">Vorzeile</p>
+                <h2 class="kern-title">{card.title}</h2>
+                <p class="kern-subline">Unterzeile</p>
+              </header>
+              <div class="kern-card__body">
+                <p class="kern-body">{card.text}</p>
+              </div>
+              <div class="kern-card__footer">
+                <button type="button" class="kern-btn kern-btn--primary">
+                  <span class="kern-label">Button 1</span>
+                </button>
+                <button type="button" class="kern-btn kern-btn--secondary">
+                  <span class="kern-label">Button 2</span>
+                </button>
+              </div>
+            </div>
+          </article>
+        ))
+      }
+    </section>
+  </main>
 </Layout>
