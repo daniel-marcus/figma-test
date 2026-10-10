@@ -117,7 +117,20 @@ jobs:
         env:
           FIGMA_TOKEN: ${{ secrets.FIGMA_ACCESS_TOKEN }}
         run: |
-          api() { curl -fsS -H "X-Figma-Token: $FIGMA_TOKEN" "https://api.figma.com/v1/$1"; }
+          set -o pipefail
+          # Figma REST call that reports HTTP errors with Figma's rate-limit headers.
+          # Rate limits: https://developers.figma.com/docs/rest-api/rate-limits/
+          api() {
+            local status retry
+            status=$(curl -sS -o "$RUNNER_TEMP/figma-body" -D "$RUNNER_TEMP/figma-headers" -w '%{http_code}' \
+              -H "X-Figma-Token: $FIGMA_TOKEN" "https://api.figma.com/v1/$1")
+            if [ "$status" = 200 ]; then cat "$RUNNER_TEMP/figma-body"; return 0; fi
+            retry=$(grep -i '^retry-after:' "$RUNNER_TEMP/figma-headers" | tr -dc '0-9' || true)
+            echo "::error::Figma API /v1/${1%%\?*} returned HTTP $status${retry:+ (retry after ${retry}s ≈ $((retry / 3600))h)}" >&2
+            grep -iE '^(retry-after|x-figma-rate-limit-type|x-figma-plan-tier):' "$RUNNER_TEMP/figma-headers" >&2 || true
+            head -c 500 "$RUNNER_TEMP/figma-body" >&2; echo >&2
+            return 1
+          }
           mkdir -p .figma public/figma
 
           # Framelink (the Figma MCP server) as one-off CLI: same compact, LLM-friendly output as its get_figma_data tool
@@ -127,9 +140,10 @@ jobs:
             --file-key "$FILE_KEY" --node-id "$NODE_ID" --format json > .figma/design.json
           yq -P -o yaml .figma/design.json > .figma/design.yaml
 
-          frame_url=$(api "images/$FILE_KEY?ids=$NODE_ID&format=png&scale=2" | jq -r --arg id "$NODE_ID" '.images[$id] // empty')
+          render=$(api "images/$FILE_KEY?ids=$NODE_ID&format=png&scale=2")
+          frame_url=$(jq -r --arg id "$NODE_ID" '.images[$id] // empty' <<< "$render")
           if [ -z "$frame_url" ]; then
-            echo "::error::Figma did not return a render for node $NODE_ID. Check the URL and token access."
+            echo "::error::Figma returned no render for node $NODE_ID (is it a visible frame?)"
             exit 1
           fi
           curl -fsSL "$frame_url" -o .figma/frame.png
